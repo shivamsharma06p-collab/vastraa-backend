@@ -3,7 +3,6 @@ require("dotenv").config();
 const express = require("express");
 const fs = require("fs");
 const path = require("path");
-const fetch = require("node-fetch"); // npm i node-fetch@2
 const bodyParser = require("body-parser");
 const cors = require("cors");
 const nodemailer = require("nodemailer");
@@ -17,49 +16,70 @@ const DATA_DIR = __dirname;
 const ORDERS_FILE = path.join(DATA_DIR, "orders.json");
 const REVIEWS_FILE = path.join(DATA_DIR, "reviews.json");
 
-// ensure files exist
-if (!fs.existsSync(ORDERS_FILE)) fs.writeFileSync(ORDERS_FILE, JSON.stringify([]));
-if (!fs.existsSync(REVIEWS_FILE)) fs.writeFileSync(REVIEWS_FILE, JSON.stringify([]));
+// Make sure JSON files exist
+if (!fs.existsSync(ORDERS_FILE)) fs.writeFileSync(ORDERS_FILE, "[]");
+if (!fs.existsSync(REVIEWS_FILE)) fs.writeFileSync(REVIEWS_FILE, "[]");
 
-// allow frontend origin (adjust origin if deploying)
-app.use(cors({
-  origin: process.env.FRONTEND_ORIGIN || "http://localhost:3000",
-  methods: ["GET","POST","PUT","DELETE","OPTIONS"],
-  allowedHeaders: ["Content-Type","Authorization"],
-}));
+// Allow frontend origin (update if deployed)
+app.use(
+  cors({
+    origin: process.env.FRONTEND_ORIGIN || "*",
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+  })
+);
 
-const readJSON = (f) => {
-  try { return JSON.parse(fs.readFileSync(f,"utf8")||"[]"); } catch(e) { return []; }
+// Helper functions
+const readJSON = (file) => {
+  try {
+    return JSON.parse(fs.readFileSync(file, "utf8") || "[]");
+  } catch {
+    return [];
+  }
 };
-const writeJSON = (f, data) => fs.writeFileSync(f, JSON.stringify(data, null, 2));
+const writeJSON = (file, data) =>
+  fs.writeFileSync(file, JSON.stringify(data, null, 2));
 
-const uid = (p="") => p + Math.random().toString(36).slice(2,9);
+const uid = (prefix = "") =>
+  prefix + Math.random().toString(36).substring(2, 9);
 
-// nodemailer (optional)
-const transporter = nodemailer.createTransport({
-  host: process.env.SMTP_HOST || "",
-  port: Number(process.env.SMTP_PORT || 587),
-  secure: process.env.SMTP_SECURE === "true",
-  auth: process.env.SMTP_USER ? { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS } : undefined,
+// Email setup (optional)
+let transporter;
+try {
+  transporter = nodemailer.createTransport({
+    host: process.env.SMTP_HOST || "",
+    port: Number(process.env.SMTP_PORT || 587),
+    secure: process.env.SMTP_SECURE === "true",
+    auth: process.env.SMTP_USER
+      ? { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
+      : undefined,
+  });
+} catch {
+  console.log("⚠️ Mail not configured, skipping email setup.");
+}
+
+// ✅ TEST ROUTE (to confirm backend is live)
+app.get("/api/test", (req, res) => {
+  res.send("✅ Vastraa Backend is Live & Working Perfectly!");
 });
 
-// health
+// 🟢 Ping check
 app.get("/ping", (req, res) => res.json({ ok: true, time: Date.now() }));
 
-// GET orders (admin)
+// 🛒 GET Orders
 app.get("/api/orders", (req, res) => {
   const orders = readJSON(ORDERS_FILE);
   res.json({ ok: true, orders });
 });
 
-// POST create order
+// 🧾 POST Create Order
 app.post("/api/orders", async (req, res) => {
   try {
     const body = req.body || {};
-    // basic validation
     if (!body.items || !Array.isArray(body.items) || body.items.length === 0) {
-      return res.status(400).json({ ok:false, error:"no items provided" });
+      return res.status(400).json({ ok: false, error: "No items provided" });
     }
+
     const order = {
       id: uid("ORD_"),
       items: body.items,
@@ -68,89 +88,97 @@ app.post("/api/orders", async (req, res) => {
       status: body.paymentMethod === "COD" ? "processing" : "pending_payment",
       createdAt: Date.now(),
       customer: body.customer || {},
-      meta: body.meta || {},
     };
 
-    // persist
     const orders = readJSON(ORDERS_FILE);
     orders.unshift(order);
     writeJSON(ORDERS_FILE, orders);
 
-    // notify admin (non-blocking)
+    // Send email (optional)
     if (process.env.ADMIN_EMAIL && transporter) {
       transporter.sendMail({
-        from: process.env.SMTP_FROM || process.env.SMTP_USER || "no-reply@example.com",
+        from: process.env.SMTP_FROM || "no-reply@vastraa.com",
         to: process.env.ADMIN_EMAIL,
-        subject: `New Order ${order.id}`,
-        text: `New order ${order.id} total: ${order.total}`,
-      }).catch(err => console.warn("mail failed", err && err.message));
+        subject: `New Order: ${order.id}`,
+        text: `New order placed: ₹${order.total}\nOrder ID: ${order.id}`,
+      });
     }
 
-    // If paymentMethod is UPI, create upi link
+    // UPI Payment link
     if (order.paymentMethod === "UPI") {
       const upiId = process.env.MERCHANT_UPI_ID || "shivamsharma.spg@okhdfcbank";
       const merchantName = process.env.MERCHANT_NAME || "VASTRAA WEARS";
       const amount = (order.total || 0).toFixed(2);
-      // UPI deep link format
-      const upiLink = `upi://pay?pa=${encodeURIComponent(upiId)}&pn=${encodeURIComponent(merchantName)}&am=${encodeURIComponent(amount)}&tn=${encodeURIComponent(`Order ${order.id}`)}&cu=INR`;
-      return res.json({ ok:true, order, upiLink });
+      const upiLink = `upi://pay?pa=${upiId}&pn=${merchantName}&am=${amount}&tn=Order%20${order.id}&cu=INR`;
+      return res.json({ ok: true, order, upiLink });
     }
 
-    return res.json({ ok:true, order });
-  } catch (e) {
-    console.error("order create error:", e);
-    return res.status(500).json({ ok:false, error: e.message || "server error" });
+    res.json({ ok: true, order });
+  } catch (err) {
+    console.error("Order Error:", err);
+    res.status(500).json({ ok: false, error: "Server error" });
   }
 });
 
-// Update order status (admin)
-app.post("/api/orders/:id/status", (req,res) => {
-  const id = req.params.id;
-  const { status, note } = req.body;
+// 🟣 Update order status
+app.post("/api/orders/:id/status", (req, res) => {
+  const { id } = req.params;
+  const { status } = req.body;
   const orders = readJSON(ORDERS_FILE);
-  const idx = orders.findIndex(o => o.id === id);
-  if (idx === -1) return res.status(404).json({ ok:false, error:"not found" });
-  orders[idx].status = status || orders[idx].status;
-  if (note) orders[idx].note = note;
+  const order = orders.find((o) => o.id === id);
+  if (!order) return res.status(404).json({ ok: false, error: "Not found" });
+  order.status = status || order.status;
   writeJSON(ORDERS_FILE, orders);
-  res.json({ ok:true, order: orders[idx] });
+  res.json({ ok: true, order });
 });
 
-// Reviews - GET
+// ⭐ GET Reviews
 app.get("/api/reviews", (req, res) => {
   const reviews = readJSON(REVIEWS_FILE);
-  // newest first
-  reviews.sort((a,b)=>b.createdAt - a.createdAt);
-  res.json({ ok:true, reviews });
+  reviews.sort((a, b) => b.createdAt - a.createdAt);
+  res.json({ ok: true, reviews });
 });
 
-// Reviews - POST (permanent)
+// 📝 POST Review
 app.post("/api/reviews", (req, res) => {
-  try {
-    const { name, rating, comment } = req.body || {};
-    if (!name || !comment) return res.status(400).json({ ok:false, error:"name & comment required" });
-    const reviews = readJSON(REVIEWS_FILE);
-    const rev = { id: uid("REV_"), name, rating: Number(rating || 5), comment, createdAt: Date.now() };
-    reviews.unshift(rev);
-    writeJSON(REVIEWS_FILE, reviews);
-    return res.json({ ok:true, review: rev });
-  } catch (e) {
-    console.error("review error", e);
-    return res.status(500).json({ ok:false, error: e.message || "server error" });
-  }
+  const { name, rating, comment } = req.body || {};
+  if (!name || !comment)
+    return res.status(400).json({ ok: false, error: "Name & comment required" });
+  const reviews = readJSON(REVIEWS_FILE);
+  const newReview = {
+    id: uid("REV_"),
+    name,
+    rating: Number(rating || 5),
+    comment,
+    createdAt: Date.now(),
+  };
+  reviews.unshift(newReview);
+  writeJSON(REVIEWS_FILE, reviews);
+  res.json({ ok: true, review: newReview });
 });
 
-// Admin views (simple)
-app.get("/admin/orders", (req,res) => {
+// 🧠 Simple admin views
+app.get("/admin/orders", (req, res) => {
   const orders = readJSON(ORDERS_FILE);
-  res.send(`<html><body><h1>Orders (${orders.length})</h1><pre>${JSON.stringify(orders,null,2)}</pre></body></html>`);
+  res.send(
+    `<h2>Orders (${orders.length})</h2><pre>${JSON.stringify(
+      orders,
+      null,
+      2
+    )}</pre>`
+  );
 });
-app.get("/admin/reviews", (req,res) => {
+app.get("/admin/reviews", (req, res) => {
   const reviews = readJSON(REVIEWS_FILE);
-  res.send(`<html><body><h1>Reviews (${reviews.length})</h1><pre>${JSON.stringify(reviews,null,2)}</pre></body></html>`);
+  res.send(
+    `<h2>Reviews (${reviews.length})</h2><pre>${JSON.stringify(
+      reviews,
+      null,
+      2
+    )}</pre>`
+  );
 });
 
 app.listen(PORT, () => {
-  console.log(`Backend running on http://localhost:${PORT}`);
-  console.log("Make sure .env is configured. /api/orders accepts POST and /api/reviews stores reviews.");
+  console.log(`✅ Backend running at http://localhost:${PORT}`);
 });
